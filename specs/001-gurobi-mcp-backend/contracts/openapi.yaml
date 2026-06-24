@@ -1,0 +1,186 @@
+openapi: 3.1.0
+info:
+  title: Gurobi MCP Multi-User Backend
+  version: 1.0.0
+  description: >
+    Pure JSON API. The only externally reachable surface (via Caddy/HTTPS).
+    Provides registration, sign-in, and a conversational proxy to per-user
+    gurobi/mcp containers. The future webapp consumes only these endpoints.
+
+servers:
+  - url: https://{domain}
+    description: Caddy-terminated HTTPS front
+    variables:
+      domain:
+        default: example.com
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    SignupRequest:
+      type: object
+      required: [username, password, access_id, gurobi_secret]
+      properties:
+        username: { type: string, minLength: 1 }
+        password: { type: string, minLength: 8, writeOnly: true }
+        access_id: { type: string, description: Gurobi Intelligence Access ID }
+        gurobi_secret: { type: string, writeOnly: true, description: Gurobi Intelligence Secret (encrypted at rest, never returned) }
+    SignupResponse:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, writeOnly: true }
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        expires_in: { type: integer, description: seconds until expiry }
+    FilePayload:
+      type: object
+      required: [filename, content_b64]
+      properties:
+        filename: { type: string }
+        content_b64: { type: string, description: base64-encoded file bytes }
+    ChatRequest:
+      type: object
+      required: [conversation_id, agent, prompt]
+      properties:
+        conversation_id:
+          type: string
+          description: Client-generated per thread; reused for all follow-ups (FR-009)
+        agent:
+          type: string
+          enum: [gurobot, explainer, modeler]
+          description: >
+            Which MCP agent to call (FR-008). Bound to the conversation on first
+            use and immutable thereafter — a follow-up with a different agent for
+            the same conversation_id is rejected 400 (FR-029, FR-030). An invalid
+            enum value is rejected 400 (FR-015).
+        prompt:
+          type: string
+        input_files:
+          type: array
+          items: { $ref: '#/components/schemas/FilePayload' }
+          nullable: true
+    ChatResponse:
+      type: object
+      properties:
+        conversation_id: { type: string }
+        agent: { type: string, description: the agent bound to this conversation }
+        response: { type: string, description: agent text output }
+        output_files:
+          type: array
+          items: { $ref: '#/components/schemas/FilePayload' }
+        recovered:
+          type: boolean
+          description: true when a stale/reaped session was transparently rebuilt (FR-023)
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /signup:
+    post:
+      summary: Register a new user with their own Gurobi credentials
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SignupRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignupResponse' }
+        '409':
+          description: Username already exists (FR-002)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Validation error
+
+  /login:
+    post:
+      summary: Authenticate and receive a JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '401':
+          description: Invalid credentials (FR-006)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /chat:
+    post:
+      summary: Send a message to an MCP agent within a conversation thread
+      description: >
+        Verifies JWT, resolves user, validates the agent enum and (for an existing
+        conversation_id) that the agent matches the bound one, ensures their
+        container is running, resolves/opens the MCP session for
+        (user_id, conversation_id) — binding the agent on first use — calls the
+        agent, returns response + any output files. Recovers transparently if the
+        session's container was reaped (FR-023), reusing the bound agent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatRequest' }
+      responses:
+        '200':
+          description: Assistant response
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatResponse' }
+        '400':
+          description: >
+            Missing/invalid agent enum (FR-015), agent changed mid-conversation
+            for an existing conversation_id (FR-030), or otherwise malformed request
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401':
+          description: Missing/invalid/expired token (FR-007)
+        '413':
+          description: Input files exceed the size cap
+        '502':
+          description: Upstream Gurobi credentials rejected or MCP unreachable (FR-026)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '503':
+          description: Container port pool exhausted (edge case)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /conversations/{conversation_id}:
+    delete:
+      summary: Explicitly end a conversation and release its session (FR-014)
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Session closed and removed (idempotent if none existed)
+        '401':
+          description: Missing/invalid token

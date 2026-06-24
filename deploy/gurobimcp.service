@@ -1,0 +1,19 @@
+[Unit]
+Description=Gurobi MCP Multi-User Backend
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=opc
+Group=docker
+WorkingDirectory=/home/opc/gurobiMCP
+EnvironmentFile=/etc/gurobimcp.env
+ExecStart=/home/opc/gurobiMCP/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

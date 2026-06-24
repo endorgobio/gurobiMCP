@@ -1,0 +1,14 @@
+# Gurobi MCP Multi-User Backend — Caddy reverse proxy
+#
+# Replace {$DOMAIN} with your actual domain name, or set the DOMAIN environment
+# variable before starting Caddy.  If only a bare IP is available for v1, swap
+# the site label to the IP and add `tls internal` for self-signed certs:
+#
+#   157.137.238.60 {
+#       tls internal
+#       reverse_proxy 127.0.0.1:8000
+#   }
+
+{$DOMAIN} {
+    reverse_proxy 127.0.0.1:8000
+}
